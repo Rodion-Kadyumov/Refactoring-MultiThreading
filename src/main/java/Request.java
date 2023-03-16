@@ -1,4 +1,3 @@
-
 public class Request {
 
     private final String method;

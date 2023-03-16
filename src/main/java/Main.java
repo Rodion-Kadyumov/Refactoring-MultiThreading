@@ -9,7 +9,7 @@ public class Main {
         Server server = new Server(SERVER_PORT, THREAD_POOL_SIZE);
 
 
-        
+
         server.addHandler("GET", "/messages", (request, responseStream) -> {
             try {
                 server.responseWithoutContent(responseStream, "404", "Not Found");
