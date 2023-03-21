@@ -1,144 +1,144 @@
-import java.io.*;
+package org.example;
+
+import java.io.BufferedOutputStream;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.URISyntaxException;
+import java.util.List;
+
+
+import java.io.*;
+import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 
 public class Server {
-    private final int SERVER_SOCKET;
-    private final List<String> validPaths = List.of("/index.html", "/spring.svg", "/spring.png",
-            "/resources.html", "/styles.css", "/app.js", "/links.html", "/forms.html", "/classic.html",
-            "/events.html", "/events.js");
+  private final List<String> validPath = List.of("/index.html", "/spring.svg", "/spring.png",
+    "/resources.html", "/styles.css", "/app.js", "/links.html", "/forms.html",
+    "/classic.html", "/events.html", "/events.js");
+  private final int PORT = 9999;
+  private final ExecutorService executorService;
+  private final ServerSocket serverSocket;
 
-    private final ExecutorService executorService;
-    private final ConcurrentHashMap<String, Map<String, Handler>> handlers;
-
-    public Server(int serverSocket, int poolSize) {
-        SERVER_SOCKET = serverSocket;
-        executorService = Executors.newFixedThreadPool(poolSize);
-        handlers = new ConcurrentHashMap<>();
+  public Server() {
+    try {
+      serverSocket = new ServerSocket(PORT);
+      executorService = Executors.newFixedThreadPool(64);
+    } catch (IOException e) {
+      throw new RuntimeException(e);
     }
+  }
 
-    public void start() throws InterruptedException {
-        try (final var serverSocket = new ServerSocket(SERVER_SOCKET)) {
-            while (!serverSocket.isClosed()) {
-                Socket socket = serverSocket.accept();
-                executorService.execute(() -> proceedConnection(socket));
-            }
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        } finally {
-            executorService.awaitTermination(2000L, TimeUnit.MINUTES);
-            executorService.shutdown();
+  public void start() {
+    while (true) {
+      try {
+        final var socket = serverSocket.accept();
+        executorService.submit(() -> {
+          this.connection(socket);
+        });
+
+      } catch (IOException ex) {
+        throw new RuntimeException(ex);
+      }
+    }
+  }
+
+  public void connection(Socket socket) {
+    try (
+      final var in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+      final var out = new BufferedOutputStream(socket.getOutputStream())) {
+      while (true) {
+        // read only request line for simplicity
+        // must be in form GET /path HTTP/1.1
+        final var requestLine = in.readLine();
+        if (requestLine == null || requestLine.trim().length() == 0) {
+          break;
         }
-    }
+        final var parts = requestLine.split(" ");
 
-    private void proceedConnection(Socket socket){
-        try (final var in = new BufferedInputStream(socket.getInputStream());
-             final var out = new BufferedOutputStream(socket.getOutputStream())) {
-
-            Request request = Request.createRequest(in);
-            // Check for bad request and drop connection
-            if (request == null || !handlers.containsKey(request.getMethod())) {
-                responseWithoutContent(out, "400", "Bad request");
-                return;
-            } else {
-                // Print out debug into for request
-                printRequestDebug(request);
-            }
-
-            Map<String, Handler> handlerMap = handlers.get(request.getMethod());
-            String requestPath = request.getPath().split("\\?")[0];
-            if (handlerMap.containsKey(requestPath)) {
-                Handler handler = handlerMap.get(requestPath);
-                handler.handle(request, out);
-            } else {
-                if (!validPaths.contains(requestPath)) {
-                    responseWithoutContent(out, "404", "Not found");
-                } else {
-                    defaultHandler(out, requestPath);
-                }
-            }
-        } catch (IOException | URISyntaxException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    private void printRequestDebug(Request request) {
-        System.out.println("Request debug information: ");
-        System.out.println("METHOD: " + request.getMethod());
-        System.out.println("PATH: " + request.getPath());
-        System.out.println("HEADERS: " + request.getHeaders());
-        System.out.println("Query Params: ");
-        for (var para : request.getQueryParams()) {
-            System.out.println(para.getName() + " = " + para.getValue());
+        if (parts.length != 3) {
+          socket.close();
+          break;
         }
 
-        System.out.println("Test for dumb param name: ");
-        System.out.println(request.getQueryParam("YetAnotherDumb").getName());
-        System.out.println("Test for dumb  param  name-value: ");
-        System.out.println(request.getQueryParam("testDebugInfo").getValue());
-    }
+        final var path = parts[1];
+        if (!validPath.contains(path)) {
+          notFound404(out);
+          break;
+        }
 
-    void defaultHandler(BufferedOutputStream out, String path) throws IOException {
         final var filePath = Path.of(".", "public", path);
         final var mimeType = Files.probeContentType(filePath);
 
         // special case for classic
-        if (path.startsWith("/classic.html")) {
-            final var template = Files.readString(filePath);
-            final var content = template.replace(
-                    "{time}",
-                    LocalDateTime.now().toString()
-            ).getBytes();
-            out.write((
-                    "HTTP/1.1 200 OK\r\n" +
-                            "Content-Type: " + mimeType + "\r\n" +
-                            "Content-Length: " + content.length + "\r\n" +
-                            "Connection: close\r\n" +
-                            "\r\n"
-            ).getBytes());
-            out.write(content);
-            out.flush();
-            return;
+        if (path.equals("/classic.html")) {
+          classicPath(filePath, out, mimeType);
+          break;
+
         }
-
-        final var length = Files.size(filePath);
-        out.write((
-                "HTTP/1.1 200 OK\r\n" +
-                        "Content-Type: " + mimeType + "\r\n" +
-                        "Content-Length: " + length + "\r\n" +
-                        "Connection: close\r\n" +
-                        "\r\n"
-        ).getBytes());
-        Files.copy(filePath, out);
-        out.flush();
+        success200(filePath, out, mimeType);
+      }
+    } catch (IOException ex) {
+      ex.printStackTrace();
     }
+  }
 
-
-    protected void responseWithoutContent(BufferedOutputStream out, String responseCode, String responseStatus) throws IOException {
-        out.write((
-                "HTTP/1.1 " + responseCode + " " + responseStatus + "\r\n" +
-                        "Content-Length: 0\r\n" +
-                        "Connection: close\r\n" +
-                        "\r\n"
-        ).getBytes());
-        out.flush();
+  private void success200(Path filePath, OutputStream out, String mimeType) {
+    try {
+      final var length = Files.size(filePath);
+      out.write((
+        "HTTP/1.1 200 OK\r\n" +
+          "Content-Type: " + mimeType + "\r\n" +
+          "Content-Length: " + length + "\r\n" +
+          "Connection: close\r\n" +
+          "\r\n"
+      ).getBytes());
+      Files.copy(filePath, out);
+      out.flush();
+    } catch (IOException e) {
+      e.printStackTrace();
     }
+  }
 
-    protected void addHandler(String method, String path, Handler handler) {
-        if (!handlers.containsKey(method)) {
-            handlers.put(method, new HashMap<>());
-        }
-        handlers.get(method).put(path, handler);
+  private void classicPath(Path filePath, OutputStream out, String mimeType) {
+    try {
+      final var template = Files.readString(filePath);
+      final var content = template.replace(
+        "{time}",
+        LocalDateTime.now().toString()
+      ).getBytes();
+      out.write((
+        "HTTP/1.1 200 OK\r\n" +
+          "Content-Type: " + mimeType + "\r\n" +
+          "Content-Length: " + content.length + "\r\n" +
+          "Connection: close\r\n" +
+          "\r\n"
+      ).getBytes());
+      out.write(content);
+      out.flush();
+
+    } catch (IOException e) {
+    e.printStackTrace();
     }
+  }
+
+  private void notFound404(OutputStream out) {
+    try {
+      out.write((
+        "HTTP/1.1 404 Not Found\r\n" +
+          "Content-Length: 0\r\n" +
+          "Connection: close\r\n" +
+          "\r\n"
+      ).getBytes());
+      out.flush();
+    } catch (IOException e) {
+      e.printStackTrace();
+    }
+  }
 }
